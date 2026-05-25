@@ -1,0 +1,19 @@
+{
+  "name": "image-fn",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Zero-dependency Bun.Image transform demo server with lightweight UI",
+  "packageManager": "bun@1.3.14",
+  "scripts": {
+    "dev": "bun --watch src/index.ts",
+    "start": "bun src/index.ts",
+    "typecheck": "bunx tsc --noEmit",
+    "test": "bun run src/lib/transform.test.ts"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.0.0"
+  }
+}

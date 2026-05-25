@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ImageFn</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css?v=20260524-compact">
+</head>
+<body>
+  <div class="app">
+    <header class="bar">
+      <div class="bar-start">
+        <div class="bar-title">
+          <strong>ImageFn</strong>
+          <span>Bun.Image transforms · shareable URLs</span>
+        </div>
+      </div>
+      <div class="bar-end">
+        <a href="/docs" class="nav-link">Docs</a>
+        <div class="bar-meta hidden" id="metadata-hud">
+          <span id="hud-format">—</span>
+          <span id="hud-dimensions">—</span>
+          <span id="hud-size">—</span>
+          <span id="hud-cache" class="cache-pill">—</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="main">
+      <aside class="sidebar">
+        <section class="block">
+          <h2>Source</h2>
+          <input type="url" id="image-url" class="input" placeholder="https://…" value="https://images.unsplash.com/photo-1579546929518-9e396f3cc809">
+          <p class="source-note" id="url-source-note">Paste an HTTPS image URL to preview its source size.</p>
+          <dl class="source-stats" id="source-stats">
+            <div><dt>Source size</dt><dd id="source-size">—</dd></div>
+            <div><dt>Output size</dt><dd id="output-size">—</dd></div>
+          </dl>
+        </section>
+
+        <section class="block">
+          <h2>Transform</h2>
+          <div class="grid2">
+            <label class="field"><span>Width</span><input type="number" id="resize-w" class="input" min="1" max="12000" placeholder="Auto" value="800"></label>
+            <label class="field"><span>Height</span><input type="number" id="resize-h" class="input" min="1" max="12000" placeholder="Auto" value="800"></label>
+            <label class="field"><span>Fit</span>
+              <select id="resize-fit" class="input">
+                <option value="pad" selected>Contain</option>
+                <option value="inside">Inside</option>
+                <option value="fill">Cover</option>
+              </select>
+            </label>
+            <label class="field"><span>Rotate</span>
+              <select id="rotate" class="input">
+                <option value="0">0°</option>
+                <option value="90">90°</option>
+                <option value="180">180°</option>
+                <option value="270">270°</option>
+              </select>
+            </label>
+            <label class="field"><span>Format</span>
+              <select id="output-fmt" class="input">
+                <option value="webp" selected>WebP</option>
+                <option value="jpeg">JPEG</option>
+                <option value="avif">AVIF</option>
+                <option value="png">PNG</option>
+              </select>
+            </label>
+            <label class="field" id="quality-group"><span>Quality</span>
+              <input type="range" id="quality" min="1" max="100" value="80">
+              <output id="quality-val">80</output>
+            </label>
+          </div>
+          <button type="button" class="btn primary" id="btn-apply">Apply</button>
+        </section>
+
+        <section class="block block-share">
+          <h2>Share</h2>
+          <label class="field">
+            <span>Image URL</span>
+            <div class="share-row">
+              <input type="text" id="share-url" class="input mono" readonly placeholder="/i?url=…&w=…">
+              <button type="button" class="btn" id="btn-copy-url">Copy</button>
+            </div>
+          </label>
+          <label class="field">
+            <span>Editor URL</span>
+            <div class="share-row">
+              <input type="text" id="share-editor-url" class="input mono" readonly placeholder="/?url=…&w=…">
+              <button type="button" class="btn" id="btn-copy-editor">Copy</button>
+            </div>
+          </label>
+          <a href="#" class="btn block" id="btn-download" download="image.webp">Download</a>
+        </section>
+      </aside>
+
+      <section class="stage">
+        <div class="preview-wrap" id="preview-stage">
+          <div class="loading hidden" id="preview-loading"><div class="spin"></div></div>
+          <p class="empty" id="empty-state">Set a source URL, then click Apply transform to preview.</p>
+          <div class="preview-frame hidden" id="preview-frame">
+            <img id="preview-image" class="preview" alt="Preview">
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+  <script src="app.js?v=20260524-filename"></script>
+</body>
+</html>

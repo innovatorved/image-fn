@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ImageFn Documentation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css?v=20260524-notion2">
+</head>
+<body class="docs-page">
+  <header class="bar">
+    <div class="bar-start">
+      <a href="/" class="bar-title bar-home">
+        <strong>ImageFn</strong>
+        <span>Bun.Image transforms · shareable URLs</span>
+      </a>
+    </div>
+    <div class="bar-end">
+      <a href="/docs" class="nav-link is-active">Docs</a>
+    </div>
+  </header>
+
+  <main class="docs-layout">
+    <h1>Documentation</h1>
+    <p class="docs-lead">ImageFn is a URL-only Bun.Image transform server with a static editor UI. No storage, R2 bucket, or AWS dependency — transforms are driven entirely by query parameters.</p>
+
+    <h2>How to use</h2>
+    <h3>Web editor</h3>
+    <ol>
+      <li>Open the <a href="/">editor</a> at <code>/</code>.</li>
+      <li>Paste an HTTPS image URL in <strong>Source</strong>.</li>
+      <li>Set width, height, fit, rotate, format, and quality under <strong>Transform</strong>.</li>
+      <li>Click <strong>Apply transform</strong> to preview the result.</li>
+      <li>Copy the image URL, editor link, or download the output from <strong>Share</strong>.</li>
+    </ol>
+
+    <h3>Image URL vs editor URL</h3>
+    <p>Both URLs use the same query string. Only the path changes:</p>
+    <ul>
+      <li><code>/i?...</code> — returns transformed image bytes (use in <code>&lt;img&gt;</code> tags).</li>
+      <li><code>/?...</code> — opens the editor with the same settings pre-filled.</li>
+    </ul>
+    <pre><code># Embed the transformed image
+/i?url=https%3A%2F%2Fexample.com%2Fphoto.jpg&amp;w=800&amp;fmt=webp&amp;q=80
+
+# Reopen the same edit in the UI
+/?url=https%3A%2F%2Fexample.com%2Fphoto.jpg&amp;w=800&amp;fmt=webp&amp;q=80</code></pre>
+
+    <h3>Common examples</h3>
+    <p>Resize to 1200px wide, keep aspect ratio:</p>
+    <pre><code>/i?url=https%3A%2F%2Fexample.com%2Fphoto.jpg&amp;w=1200&amp;fit=inside&amp;fmt=webp&amp;q=82</code></pre>
+    <p>Square cover crop:</p>
+    <pre><code>/i?url=https%3A%2F%2Fexample.com%2Fphoto.jpg&amp;w=600&amp;h=600&amp;fit=fill&amp;fmt=jpeg&amp;q=85</code></pre>
+    <p>Let the server pick the best format from the browser <code>Accept</code> header:</p>
+    <pre><code>/i?url=https%3A%2F%2Fexample.com%2Fphoto.jpg&amp;w=900&amp;fmt=auto&amp;q=80</code></pre>
+
+    <h2>API usage</h2>
+    <h3>Transform image</h3>
+    <pre><code>GET /i?url=&lt;https-image-url&gt;&amp;w=800&amp;h=600&amp;fit=inside&amp;rot=90&amp;fmt=webp&amp;q=80</code></pre>
+    <p>Legacy <code>/api/image?...</code> redirects to <code>/i?...</code> with <code>308</code>.</p>
+    <div class="docs-table-wrap">
+      <table>
+        <thead>
+          <tr><th>Param</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>url</code></td><td>Required HTTPS source image URL</td></tr>
+          <tr><td><code>w</code>, <code>h</code></td><td>Output width/height from 1 to 12000</td></tr>
+          <tr><td><code>fit</code></td><td><code>pad</code> (default) fits inside the box on a white canvas; <code>inside</code> fits without padding; <code>fill</code> crops/stretches to cover</td></tr>
+          <tr><td><code>withoutEnlargement</code></td><td><code>true</code> never upscales during resize</td></tr>
+          <tr><td><code>filter</code></td><td>Resize kernel: <code>lanczos3</code> (default), <code>mitchell</code>, <code>box</code>, etc.</td></tr>
+          <tr><td><code>rot</code></td><td>Rotate by <code>90</code>, <code>180</code>, or <code>270</code></td></tr>
+          <tr><td><code>flip</code></td><td><code>true</code> flips vertically</td></tr>
+          <tr><td><code>flop</code></td><td><code>true</code> flips horizontally</td></tr>
+          <tr><td><code>fmt</code></td><td><code>webp</code>, <code>jpeg</code>, <code>jpg</code>, <code>png</code>, <code>avif</code>, or <code>auto</code></td></tr>
+          <tr><td><code>q</code></td><td>Quality 1–100 (ignored for PNG)</td></tr>
+          <tr><td><code>brightness</code></td><td>Optional 0–3 (Bun.Image modulation)</td></tr>
+          <tr><td><code>saturation</code></td><td>Optional 0–3 (Bun.Image modulation)</td></tr>
+          <tr><td><code>placeholder=true</code></td><td>Returns JSON with a tiny blurred data URL</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Health check</h3>
+    <pre><code>GET /api/health</code></pre>
+    <p>Returns <code>status</code>, <code>runtime</code>, <code>engine</code>, <code>storage</code>, and configured pixel/cache limits.</p>
+
+    <h2>Deployment</h2>
+    <h3>Local development</h3>
+    <pre><code>bun install
+cp .env.example .env
+bun run dev</code></pre>
+    <p>Open <code>http://localhost:8787</code>. Use <code>bun run start</code> for a non-watch server.</p>
+
+    <h3>Docker build and run</h3>
+    <p>Build the image:</p>
+    <pre><code>docker build -t image-fn .
+# or
+bun run docker:build</code></pre>
+    <p>Run the container on port 8787:</p>
+    <pre><code>cp .env.example .env
+docker run --rm -p 8787:8787 --env-file .env image-fn
+# or
+bun run docker:run</code></pre>
+    <p>The Docker image includes a healthcheck against <code>/api/health</code>. Verify manually:</p>
+    <pre><code>curl http://localhost:8787/api/health</code></pre>
+
+    <div class="docs-callout">
+      <strong>Production:</strong> Put the container behind HTTPS at your load balancer. Restrict <code>ALLOWED_HOST_SUFFIXES</code> to known image hosts. The in-memory cache is per-container and resets on restart.
+    </div>
+
+    <h3>Environment variables</h3>
+    <div class="docs-table-wrap">
+      <table>
+        <thead>
+          <tr><th>Variable</th><th>Default</th><th>Purpose</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>PORT</code></td><td>8787</td><td>HTTP port</td></tr>
+          <tr><td><code>ENVIRONMENT</code></td><td>development / production in Docker</td><td>Runtime mode</td></tr>
+          <tr><td><code>CORS_ORIGIN</code></td><td>*</td><td>Allowed CORS origin</td></tr>
+          <tr><td><code>ALLOWED_HOST_SUFFIXES</code></td><td>*</td><td>Comma-separated allowed source host suffixes</td></tr>
+          <tr><td><code>CACHE_TTL_SECONDS</code></td><td>3600</td><td>In-memory transform cache TTL</td></tr>
+          <tr><td><code>MAX_IMAGE_PIXELS</code></td><td>268435456</td><td>Source decode pixel limit</td></tr>
+          <tr><td><code>MAX_OUTPUT_PIXELS</code></td><td>41943040</td><td>Output pixel limit</td></tr>
+          <tr><td><code>MAX_SOURCE_BYTES</code></td><td>26214400 (25 MB)</td><td>Remote source byte limit</td></tr>
+          <tr><td><code>MAX_CACHE_BYTES</code></td><td>134217728 (128 MB)</td><td>Total in-memory cache budget</td></tr>
+          <tr><td><code>SOURCE_FETCH_TIMEOUT_MS</code></td><td>10000</td><td>Remote fetch timeout</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Security and limits</h2>
+    <ul>
+      <li>Source URLs must be HTTPS. Localhost, private IPs, link-local, <code>.local</code>, and <code>.internal</code> hosts are blocked.</li>
+      <li>Remote fetches respect <code>MAX_SOURCE_BYTES</code>, decode respects <code>MAX_IMAGE_PIXELS</code>, and output respects <code>MAX_OUTPUT_PIXELS</code>.</li>
+      <li>Source fetches time out after <code>SOURCE_FETCH_TIMEOUT_MS</code>.</li>
+      <li>The app is stateless — no persistent volume required.</li>
+    </ul>
+
+    <h2>About</h2>
+    <p>I’m Ved Gupta. I built this project to make live interview support faster and less distracting.</p>
+    <p><strong>Contact:</strong> <a href="mailto:vedgupta@protonmail.com">vedgupta@protonmail.com</a></p>
+    <p>If you find the project useful, please star the repo on GitHub.</p>
+
+    <footer class="docs-footer">
+      ImageFn — Bun-based image transforms. <a href="https://bun.sh/">Powered by Bun</a>
+    </footer>
+  </main>
+</body>
+</html>

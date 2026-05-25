@@ -1,0 +1,4 @@
+# Bun project config — use `bun install` / `bun run` (not npm)
+
+[test]
+root = "./src"
