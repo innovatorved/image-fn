@@ -18,6 +18,7 @@ import {
 } from "./storage";
 
 const PORT = Number(process.env.PORT ?? 8787);
+const HOSTNAME = process.env.BIND_ADDRESS ?? "0.0.0.0";
 const REGION = process.env.AZURE_REGION ?? "local";
 const PUBLIC_DIR = new URL("../public/", import.meta.url);
 const MAX_SOURCE_BYTES = readPositiveIntEnv("MAX_SOURCE_BYTES", 25 * 1024 * 1024);
@@ -66,6 +67,7 @@ await initStorageContainers();
 
 Bun.serve({
   port: PORT,
+  hostname: HOSTNAME,
   async fetch(request) {
     const url = new URL(request.url);
 
@@ -154,7 +156,7 @@ Bun.serve({
 });
 
 console.log(
-  `[image-fn] Listening on http://0.0.0.0:${PORT} in region '${REGION}' ` +
+  `[image-fn] Listening on http://${HOSTNAME}:${PORT} in region '${REGION}' ` +
     `(storage=${isAzureStorageEnabled() ? "azure-blob" : "none"}, maxImagePixels=${MAX_IMAGE_PIXELS})`
 );
 
