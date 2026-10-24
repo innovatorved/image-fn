@@ -8,6 +8,7 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV ENVIRONMENT=production
 ENV PORT=8787
+ENV AZURE_REGION=eastus
 ENV MAX_IMAGE_PIXELS=268435456
 ENV MAX_OUTPUT_PIXELS=41943040
 ENV MAX_SOURCE_BYTES=26214400
@@ -18,4 +19,5 @@ COPY package.json ./
 COPY src ./src
 COPY public ./public
 EXPOSE 8787
+HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 CMD ["bun", "src/scripts/probe-health.ts"]
 CMD ["bun", "src/index.ts"]

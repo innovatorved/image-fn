@@ -84,8 +84,58 @@
     </div>
 
     <h3>Health check</h3>
-    <pre><code>GET /api/health</code></pre>
-    <p>Returns <code>status</code>, <code>runtime</code>, <code>engine</code>, <code>storage</code>, and configured pixel/cache limits.</p>
+    <pre><code>GET /health</code></pre>
+    <p>Returns <code>status: "ok"</code>, <code>region</code>, <code>bun</code>, <code>storageConfigured</code>, and the configured pixel/cache limits. Use this endpoint for Azure Standard Load Balancer and Azure Front Door probes. <code>GET /api/health</code> is an alias.</p>
+
+    <h2>Azure multi-region API</h2>
+    <p>When an Azure Storage Account is configured, raw originals and transformed variants are stored in Blob Storage, so every region can serve any request without local state.</p>
+
+    <h3>Upload a raw original</h3>
+    <pre><code>POST /api/upload            # multipart/form-data, field name: file
+curl -F "file=@photo.jpg" https://&lt;host&gt;/api/upload</code></pre>
+    <p>The bytes are validated with <code>new Bun.Image(bytes).metadata()</code> and written to the <code>raw-images</code> container. The response includes the assigned <code>blob</code> name and a ready-to-use <code>sampleTransformUrl</code>.</p>
+
+    <h3>Transform (Azure-cached)</h3>
+    <pre><code>GET /api/transform?url=&lt;https-image-url&gt;&amp;w=800&amp;h=600&amp;fit=cover&amp;format=webp&amp;q=80
+GET /api/transform?blob=&lt;blobName&gt;&amp;w=800&amp;format=webp&amp;q=80</code></pre>
+    <div class="docs-table-wrap">
+      <table>
+        <thead>
+          <tr><th>Param</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>url</code> <em>or</em> <code>blob</code></td><td>HTTPS source image, or a blob name previously stored in <code>raw-images</code></td></tr>
+          <tr><td><code>w</code>, <code>h</code></td><td>Output dimensions, 1–4096</td></tr>
+          <tr><td><code>fit</code></td><td><code>inside</code> (default), <code>cover</code>, <code>contain</code>, <code>fill</code>, or <code>pad</code></td></tr>
+          <tr><td><code>format</code></td><td><code>webp</code> (default), <code>jpeg</code>/<code>jpg</code>, or <code>png</code></td></tr>
+          <tr><td><code>q</code></td><td>Quality 1–100</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>A deterministic SHA-256 key is computed from <code>(source + width + height + fit + format + quality)</code> and looked up in the <code>processed-cache</code> container first. The response advertises where the bytes came from:</p>
+    <ul>
+      <li><code>X-Cache: HIT-AZURE-BLOB</code> — primary account (RA-GRS secondary failover on outage).</li>
+      <li><code>X-Cache: HIT-AZURE-REPLICA</code> — region-local Object Replicated account.</li>
+      <li><code>X-Cache: MISS-TRANSFORMED</code> — freshly encoded with <code>Bun.Image</code>, then written through to Azure.</li>
+    </ul>
+
+    <h3>Azure environment variables</h3>
+    <div class="docs-table-wrap">
+      <table>
+        <thead>
+          <tr><th>Variable</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>AZURE_REGION</code></td><td>Region reported by <code>/health</code> (e.g. <code>eastus</code>, <code>westus2</code>, <code>northeurope</code>)</td></tr>
+          <tr><td><code>AZURE_STORAGE_ACCOUNT_NAME</code></td><td>Primary RA-GRS account; use <code>DefaultAzureCredential</code> (VM Managed Identity), no keys needed</td></tr>
+          <tr><td><code>AZURE_REPLICA_STORAGE_ACCOUNT_NAME</code></td><td>Optional region-local read replica (Object Replication)</td></tr>
+          <tr><td><code>AZURE_RAW_CONTAINER</code></td><td>Raw originals container (default <code>raw-images</code>)</td></tr>
+          <tr><td><code>AZURE_CACHE_CONTAINER</code></td><td>Transformed variants container (default <code>processed-cache</code>)</td></tr>
+          <tr><td><code>AZURE_STORAGE_CONNECTION_STRING</code></td><td>Local development only (Azurite or shared-key account)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>Run <code>bun run storage:init</code> once per account to create the containers.</p>
 
     <h2>Deployment</h2>
     <h3>Local development</h3>

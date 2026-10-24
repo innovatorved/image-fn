@@ -26,6 +26,38 @@ GET /i?url=<https-image-url>&w=800&h=800&fit=pad&fmt=webp&q=80
 | `fmt` | `webp`, `jpeg`, `png`, `avif`, or `auto` |
 | `q` | Quality 1–100 |
 
+## Azure multi-region mode
+
+`image-fn` runs statelessly across `eastus`, `westus2`, and `northeurope` behind
+Azure Standard Load Balancers + Azure Front Door. Raw originals and transformed
+variants live in Azure Blob Storage, so any region can serve any request.
+
+```bash
+# Passwordless (VM System-Assigned Managed Identity) in production:
+AZURE_REGION=eastus AZURE_STORAGE_ACCOUNT_NAME=stimagefnprod01 bun run start
+
+# Create the containers once per storage account
+bun run storage:init
+```
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /health` | Probe for Azure Load Balancer / Front Door: `{ status, region, bun, storageConfigured }` |
+| `POST /api/upload` | Validate with `Bun.Image` metadata, then store the raw original in `raw-images` |
+| `GET /api/transform?url=…` | SHA-256 cached transform of an external image |
+| `GET /api/transform?blob=…` | SHA-256 cached transform of a stored original |
+
+Storage behaviour:
+
+- **Passwordless** `DefaultAzureCredential` on Azure VMs; `AZURE_STORAGE_CONNECTION_STRING` for local dev.
+- **RA-GRS failover**: reads retry against `<account>-secondary.blob.core.windows.net` if `eastus` is down.
+- **Region-local replica**: set `AZURE_REPLICA_STORAGE_ACCOUNT_NAME` on European VMs to read from the locally Object-Replicated account first.
+- Responses report the source: `X-Cache: HIT-AZURE-BLOB`, `HIT-AZURE-REPLICA`, or `MISS-TRANSFORMED` (write-through).
+
+The legacy `/i` route also uses the shared Azure cache (L2) behind its per-instance
+in-memory cache (L1), so existing embeds keep working. See `.env.example` for all
+variables.
+
 ## Docker
 
 ```bash

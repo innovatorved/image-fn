@@ -2,8 +2,22 @@ import { corsHeaders, jsonResponse } from "./lib/cors";
 import { letterboxPng } from "./lib/letterbox";
 import { parseTransformParams, pickMimeFormat, buildOutputFilename, type FitMode, type TransformParams } from "./lib/transform";
 import { safeFetchRemote } from "./lib/ssrf";
+import {
+  CACHE_CONTAINER_NAME,
+  RAW_CONTAINER_NAME,
+  STORAGE_ACCOUNT_NAME,
+  getCachedVariant,
+  getRawBlob,
+  initStorageContainers,
+  isAzureStorageEnabled,
+  isStorageReady,
+  putCachedVariant,
+  sanitizeBlobName,
+  uploadRawBlob,
+} from "./storage";
 
 const PORT = Number(process.env.PORT ?? 8787);
+const REGION = process.env.AZURE_REGION ?? "local";
 const PUBLIC_DIR = new URL("../public/", import.meta.url);
 const MAX_SOURCE_BYTES = readPositiveIntEnv("MAX_SOURCE_BYTES", 25 * 1024 * 1024);
 const MAX_IMAGE_PIXELS = readPositiveIntEnv("MAX_IMAGE_PIXELS", 256 * 1024 * 1024);
@@ -15,6 +29,22 @@ const ENVIRONMENT = process.env.ENVIRONMENT ?? "development";
 const CORS_ORIGIN = process.env.CORS_ORIGIN ?? "*";
 const ALLOWED_HOST_SUFFIXES = process.env.ALLOWED_HOST_SUFFIXES ?? "*";
 const ENGINE = "bun-image";
+
+// Native Bun.Image guard for the Azure-facing transform API.
+const API_MAX_DIMENSION = 4096;
+const API_MAX_PIXELS = API_MAX_DIMENSION * API_MAX_DIMENSION;
+const API_FITS = new Set(["inside", "cover", "contain", "fill", "pad"]);
+const API_FORMATS: Record<string, "image/webp" | "image/jpeg" | "image/png"> = {
+  webp: "image/webp",
+  jpeg: "image/jpeg",
+  png: "image/png",
+};
+const EXTENSION_BY_MIME: Record<string, string> = {
+  "image/webp": "webp",
+  "image/jpeg": "jpg",
+  "image/png": "png",
+  "image/avif": "avif",
+};
 
 type CacheEntry = {
   status: number;
@@ -29,6 +59,10 @@ let transformCacheBytes = 0;
 
 const envForCors = { CORS_ORIGIN, ENVIRONMENT };
 
+// Connect to Azure Blob Storage before accepting traffic (best-effort: the
+// server still boots in stateless local-only mode when unconfigured).
+await initStorageContainers();
+
 Bun.serve({
   port: PORT,
   async fetch(request) {
@@ -38,13 +72,25 @@ Bun.serve({
       return new Response(null, { headers: corsHeaders(envForCors) });
     }
 
-    if (url.pathname === "/api/health") {
+    // Health probe for the regional Azure Standard Load Balancer + Azure Front Door.
+    if (url.pathname === "/health" || url.pathname === "/api/health") {
       return jsonResponse(
         {
-          status: "healthy",
+          status: "ok",
+          service: "innovatorved/image-fn",
+          region: REGION,
+          bun: Bun.version,
+          bunVersion: Bun.version,
+          storageConfigured: isAzureStorageEnabled(),
+          storageReady: isStorageReady(),
+          storageAccount: STORAGE_ACCOUNT_NAME || (isAzureStorageEnabled() ? "connection-string" : "none"),
+          storage: isAzureStorageEnabled() ? "azure-blob" : "none",
+          containers: { raw: RAW_CONTAINER_NAME, cache: CACHE_CONTAINER_NAME },
+          timestamp: new Date().toISOString(),
+          // Legacy fields kept for existing clients.
+          healthy: true,
           runtime: "bun",
           engine: ENGINE,
-          storage: "none",
           maxImagePixels: MAX_IMAGE_PIXELS,
           maxOutputPixels: MAX_OUTPUT_PIXELS,
           maxCacheBytes: MAX_CACHE_BYTES,
@@ -52,6 +98,19 @@ Bun.serve({
         200,
         envForCors
       );
+    }
+
+    // Upload a raw original image to the `raw-images` container.
+    if (url.pathname === "/api/upload" && request.method === "POST") {
+      return handleUpload(request);
+    }
+
+    // Transform endpoint used by Azure Front Door + the regional load balancers.
+    if (
+      (url.pathname === "/api/transform" || url.pathname === "/transform") &&
+      (request.method === "GET" || request.method === "HEAD")
+    ) {
+      return handleApiTransform(request, url);
     }
 
     if (url.pathname === "/api/image" && (request.method === "GET" || request.method === "HEAD")) {
@@ -64,6 +123,26 @@ Bun.serve({
       return handleTransform(request, url);
     }
 
+    if (url.pathname === "/api" || url.pathname === "/api/info") {
+      return jsonResponse(
+        {
+          service: "innovatorved/image-fn",
+          region: REGION,
+          engine: ENGINE,
+          storageConfigured: isAzureStorageEnabled(),
+          endpoints: {
+            health: "GET /health",
+            upload: "POST /api/upload (multipart/form-data field 'file')",
+            transformExternalUrl: "GET /api/transform?url=https://...&w=800&h=600&fit=cover&format=webp&q=80",
+            transformStoredBlob: "GET /api/transform?blob=<blobName>&w=800&format=webp&q=80",
+            legacyTransform: "GET /i?url=https://...&w=800&fit=inside&fmt=webp&q=80",
+          },
+        },
+        200,
+        envForCors
+      );
+    }
+
     if (request.method === "GET" || request.method === "HEAD") {
       return serveStatic(url.pathname, request.method);
     }
@@ -72,8 +151,260 @@ Bun.serve({
   },
 });
 
-console.log(`ImageFn Bun server listening on http://localhost:${PORT} (maxImagePixels=${MAX_IMAGE_PIXELS})`);
+console.log(
+  `[image-fn] Listening on http://0.0.0.0:${PORT} in region '${REGION}' ` +
+    `(storage=${isAzureStorageEnabled() ? "azure-blob" : "none"}, maxImagePixels=${MAX_IMAGE_PIXELS})`
+);
 
+// ---------------------------------------------------------------------------
+// Upload handler (POST /api/upload)
+// ---------------------------------------------------------------------------
+async function handleUpload(request: Request): Promise<Response> {
+  if (!isAzureStorageEnabled()) {
+    return jsonResponse(
+      { error: "Azure Storage is not configured. Set AZURE_STORAGE_ACCOUNT_NAME or AZURE_STORAGE_CONNECTION_STRING." },
+      503,
+      envForCors
+    );
+  }
+
+  try {
+    const formData = await request.formData();
+    const file = formData.get("file");
+    if (!(file instanceof File)) {
+      return jsonResponse({ error: "Multipart field 'file' is required." }, 400, envForCors);
+    }
+
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (bytes.byteLength > MAX_SOURCE_BYTES) {
+      return jsonResponse({ error: `Upload exceeds size limit (${MAX_SOURCE_BYTES} bytes)` }, 413, envForCors);
+    }
+
+    // Verify the payload is a decodable image before persisting it.
+    const metadata = await new Bun.Image(bytes).metadata();
+
+    const sanitizedName = file.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-120) || "upload";
+    const blobName = sanitizeBlobName(`${Date.now()}-${sanitizedName}`);
+
+    await uploadRawBlob(blobName, bytes, file.type || `image/${metadata.format}`);
+
+    return jsonResponse(
+      {
+        message: "Uploaded to Azure Blob Storage",
+        blob: blobName,
+        region: REGION,
+        metadata,
+        sampleTransformUrl: `/api/transform?blob=${encodeURIComponent(blobName)}&w=800&format=webp&q=80`,
+      },
+      200,
+      envForCors
+    );
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Upload failed";
+    return jsonResponse({ error: message }, 500, envForCors);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Azure-facing transform handler (GET/HEAD /api/transform)
+// ---------------------------------------------------------------------------
+async function handleApiTransform(request: Request, url: URL): Promise<Response> {
+  const sourceUrl = url.searchParams.get("url")?.trim();
+  const rawBlobName = url.searchParams.get("blob")?.trim();
+  if (!sourceUrl && !rawBlobName) {
+    return jsonResponse(
+      { error: "Pass either '?url=https://...' or '?blob=<filename>' query parameter." },
+      400,
+      envForCors
+    );
+  }
+  if (sourceUrl && !/^https:\/\//i.test(sourceUrl)) {
+    return jsonResponse({ error: "Transform source must be an HTTPS image URL" }, 400, envForCors);
+  }
+
+  const width = parseApiDimension(url.searchParams.get("w"));
+  const height = parseApiDimension(url.searchParams.get("h"));
+  const fit = (url.searchParams.get("fit")?.toLowerCase() || "inside") as FitMode;
+  if (!API_FITS.has(fit)) {
+    return jsonResponse({ error: "Invalid fit: use 'inside', 'cover', 'contain', 'fill', or 'pad'" }, 400, envForCors);
+  }
+  const formatRaw = (url.searchParams.get("format")?.toLowerCase() || "webp");
+  const format = formatRaw === "jpg" ? "jpeg" : formatRaw;
+  const contentType = API_FORMATS[format];
+  if (!contentType) {
+    return jsonResponse({ error: `Unsupported format: ${formatRaw}. Use webp, jpeg, or png.` }, 400, envForCors);
+  }
+  const quality = Math.min(Math.max(Number(url.searchParams.get("q")) || 80, 1), 100);
+
+  const blobName = rawBlobName ? sanitizeBlobName(rawBlobName) : undefined;
+  if (rawBlobName && !blobName) {
+    return jsonResponse({ error: "Invalid 'blob' name." }, 400, envForCors);
+  }
+  const sourceIdentifier = blobName ? `blob:${blobName}` : `url:${sourceUrl}`;
+
+  // Deterministic SHA-256 cache key from (source + width + height + fit + format + quality).
+  const cacheKey = computeApiCacheKey(sourceIdentifier, width, height, fit, format, quality);
+
+  // Step 1: Azure Blob Storage cache (shared across all 3 regions).
+  const cached = await getCachedVariant(cacheKey);
+  if (cached) {
+    return imageResponse(request, cached.buffer, {
+      "Content-Type": contentType,
+      "Cache-Control": "public, max-age=31536000, immutable",
+      "X-Cache": cached.source,
+      "X-Region": REGION,
+      "X-Transform-Engine": ENGINE,
+    });
+  }
+
+  // Step 2: Load source bytes from `raw-images` or an external URL (via the
+  // regional NAT Gateway - outbound fetch goes through the VM's egress).
+  let inputBytes: Uint8Array;
+  if (blobName) {
+    const raw = await getRawBlob(blobName);
+    if (!raw) {
+      return jsonResponse({ error: `Blob '${blobName}' not found in storage.` }, 404, envForCors);
+    }
+    if (raw.byteLength > MAX_SOURCE_BYTES) {
+      return jsonResponse({ error: `Source image exceeds size limit (${MAX_SOURCE_BYTES} bytes)` }, 413, envForCors);
+    }
+    inputBytes = new Uint8Array(raw);
+  } else {
+    const fetched = await safeFetchRemote(sourceUrl!, ALLOWED_HOST_SUFFIXES, MAX_SOURCE_BYTES, SOURCE_FETCH_TIMEOUT_MS);
+    if (!fetched.ok) {
+      return jsonResponse({ error: fetched.error }, fetched.status, envForCors);
+    }
+    const read = await readResponseBytes(fetched.response, MAX_SOURCE_BYTES);
+    if (!read.ok) {
+      return jsonResponse({ error: read.error }, read.status, envForCors);
+    }
+    inputBytes = read.body;
+  }
+
+  // Step 3: Bun.Image native C/SIMD transformation pipeline.
+  const transformed = await transformApiImage(inputBytes, { width, height, fit, format, quality, contentType });
+  if (!transformed.ok) {
+    return jsonResponse({ error: transformed.error }, transformed.status, envForCors);
+  }
+
+  // Step 4: Write-through to Azure Blob Storage (non-blocking).
+  void putCachedVariant(cacheKey, transformed.body, contentType);
+
+  return imageResponse(request, transformed.body, {
+    "Content-Type": contentType,
+    "Cache-Control": "public, max-age=31536000, immutable",
+    "X-Cache": "MISS-TRANSFORMED",
+    "X-Region": REGION,
+    "X-Transform-Engine": ENGINE,
+  });
+}
+
+async function transformApiImage(
+  inputBytes: Uint8Array,
+  options: {
+    width?: number;
+    height?: number;
+    fit: FitMode;
+    format: string;
+    quality: number;
+    contentType: "image/webp" | "image/jpeg" | "image/png";
+  }
+): Promise<{ ok: true; body: Uint8Array } | { ok: false; error: string; status: number }> {
+  const { width, height, fit, quality, contentType } = options;
+
+  // `pad` needs both dimensions: resize inside then letterbox onto a white canvas.
+  if (fit === "pad" && width !== undefined && height !== undefined) {
+    const pixelCheck = validateOutputPixels(width, height);
+    if (!pixelCheck.ok) return pixelCheck;
+    try {
+      const inner = new Bun.Image(inputBytes, { maxPixels: API_MAX_PIXELS, autoOrient: true });
+      inner.resize(width, height, { fit: "inside", withoutEnlargement: true });
+      const fittedPng = new Uint8Array(await inner.png().bytes());
+      const letterboxed = letterboxPng(fittedPng, width, height);
+      const output = new Bun.Image(letterboxed, { maxPixels: API_MAX_PIXELS, autoOrient: false });
+      const encoded = await encodeImage(output, contentType, quality);
+      return { ok: true, body: encoded.body };
+    } catch (error) {
+      return { ok: false, error: `Image processing error: ${errorMessage(error)}`, status: 422 };
+    }
+  }
+
+  try {
+    const image = new Bun.Image(inputBytes, { maxPixels: API_MAX_PIXELS, autoOrient: true });
+    // Bun.Image only supports `inside` and `fill`; `cover`/`contain` map to `inside`.
+    const bunFit = fit === "fill" ? "fill" : "inside";
+    const resizeOptions: Bun.Image.ResizeOptions = { fit: bunFit, withoutEnlargement: true };
+
+    if (width !== undefined && height !== undefined) {
+      const pixelCheck = validateOutputPixels(width, height);
+      if (!pixelCheck.ok) return pixelCheck;
+      image.resize(width, height, resizeOptions);
+    } else if (width !== undefined) {
+      image.resize(width, undefined, resizeOptions);
+    } else if (height !== undefined) {
+      const metadata = await new Bun.Image(inputBytes, { maxPixels: API_MAX_PIXELS, autoOrient: true }).metadata();
+      const derivedWidth = Math.max(1, Math.round((metadata.width / metadata.height) * height));
+      const pixelCheck = validateOutputPixels(derivedWidth, height);
+      if (!pixelCheck.ok) return pixelCheck;
+      image.resize(derivedWidth, height, resizeOptions);
+    }
+
+    const encoded = await encodeImage(image, contentType, quality);
+    return { ok: true, body: encoded.body };
+  } catch (error) {
+    return { ok: false, error: `Image processing error: ${errorMessage(error)}`, status: 422 };
+  }
+}
+
+function computeApiCacheKey(
+  sourceIdentifier: string,
+  width?: number,
+  height?: number,
+  fit?: string,
+  format?: string,
+  quality?: number
+): string {
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(
+    `${sourceIdentifier}|w=${width ?? 0}|h=${height ?? 0}|fit=${fit ?? "inside"}|fmt=${format ?? "webp"}|q=${quality ?? 80}`
+  );
+  return `${hasher.digest("hex")}.${format ?? "webp"}`;
+}
+
+function parseApiDimension(raw: string | null): number | undefined {
+  if (raw === null || raw === "") return undefined;
+  const value = Math.floor(Number(raw));
+  if (!Number.isFinite(value) || value <= 0) return undefined;
+  return Math.min(value, API_MAX_DIMENSION);
+}
+
+function imageResponse(
+  request: Request,
+  body: Uint8Array | ArrayBuffer,
+  headersInit: Record<string, string>
+): Response {
+  const headers = new Headers(headersInit);
+  for (const [key, value] of Object.entries(corsHeaders(envForCors))) {
+    headers.set(key, value);
+  }
+  if (request.method === "HEAD") {
+    return new Response(null, { status: 200, headers });
+  }
+  return new Response(bodyInit(body), { status: 200, headers });
+}
+
+/**
+ * `Buffer`/`Uint8Array` are valid runtime bodies but TypeScript's DOM
+ * `BodyInit` (TS 5.9+) is typed against `Uint8Array<ArrayBuffer>` specifically,
+ * so the shared Azure-cache buffers need an explicit widening.
+ */
+function bodyInit(body: Uint8Array | ArrayBuffer): BodyInit {
+  return body as unknown as BodyInit;
+}
+
+// ---------------------------------------------------------------------------
+// Legacy transform handler (GET/HEAD /i) - now backed by the shared Azure cache
+// ---------------------------------------------------------------------------
 async function handleTransform(request: Request, url: URL): Promise<Response> {
   const parsed = parseTransformParams(url.searchParams);
   if ("error" in parsed) {
@@ -81,7 +412,12 @@ async function handleTransform(request: Request, url: URL): Promise<Response> {
   }
 
   const accept = request.headers.get("accept");
+  const outputMime = pickMimeFormat(parsed.fmt, accept);
   const cacheKey = buildCacheKey(url, accept, parsed);
+  const azureCacheKey = buildAzureVariantKey(parsed, outputMime, accept);
+  const canUseAzure = isAzureStorageEnabled() && !parsed.placeholder;
+
+  // L1: per-instance in-memory cache.
   const cached = transformCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     const headers = new Headers(cached.headers);
@@ -92,6 +428,20 @@ async function handleTransform(request: Request, url: URL): Promise<Response> {
     return withCors(new Response(cached.body.slice(), { status: cached.status, headers }));
   }
   if (cached) transformCache.delete(cacheKey);
+
+  // L2: shared Azure Blob cache (cross-region, survives restarts).
+  if (canUseAzure) {
+    const azureCached = await getCachedVariant(azureCacheKey);
+    if (azureCached) {
+      const headers = buildTransformHeaders(parsed, outputMime);
+      headers.set("X-Cache", azureCached.source);
+      headers.set("X-Region", REGION);
+      if (request.method === "HEAD") {
+        return withCors(new Response(null, { status: 200, headers }));
+      }
+      return withCors(new Response(bodyInit(azureCached.buffer), { status: 200, headers }));
+    }
+  }
 
   try {
     const result = parsed.placeholder
@@ -108,10 +458,12 @@ async function handleTransform(request: Request, url: URL): Promise<Response> {
     headers.set("X-Transform-Engine", ENGINE);
     if (parsed.fmt === "auto") headers.set("Vary", "Accept");
     if (!parsed.placeholder) {
-      const outputMime = result.headers.get("Content-Type") || undefined;
+      const outputMimeHeader = result.headers.get("Content-Type") || undefined;
       const filename = buildOutputFilename(
         parsed,
-        outputMime?.startsWith("image/") ? (outputMime as "image/avif" | "image/webp" | "image/jpeg" | "image/png") : undefined
+        outputMimeHeader?.startsWith("image/")
+          ? (outputMimeHeader as "image/avif" | "image/webp" | "image/jpeg" | "image/png")
+          : undefined
       );
       headers.set("Content-Disposition", `attachment; filename="${filename}"`);
     }
@@ -124,6 +476,11 @@ async function handleTransform(request: Request, url: URL): Promise<Response> {
       byteLength: result.body.byteLength,
     });
 
+    // Write-through to Azure so sibling regions can serve this variant.
+    if (canUseAzure) {
+      void putCachedVariant(azureCacheKey, result.body, outputMime);
+    }
+
     if (request.method === "HEAD") {
       return withCors(new Response(null, { status: 200, headers }));
     }
@@ -134,6 +491,56 @@ async function handleTransform(request: Request, url: URL): Promise<Response> {
   }
 }
 
+function buildTransformHeaders(
+  params: TransformParams,
+  outputMime: "image/avif" | "image/webp" | "image/jpeg" | "image/png"
+): Headers {
+  const headers = new Headers({ "Content-Type": outputMime });
+  headers.set("Cache-Control", "public, max-age=31536000, immutable");
+  headers.set("X-Transform-Engine", ENGINE);
+  if (params.fmt === "auto") headers.set("Vary", "Accept");
+  if (!params.placeholder) {
+    const filename = buildOutputFilename(params, outputMime);
+    headers.set("Content-Disposition", `attachment; filename="${filename}"`);
+  }
+  return headers;
+}
+
+function buildAzureVariantKey(
+  params: TransformParams,
+  outputMime: "image/avif" | "image/webp" | "image/jpeg" | "image/png",
+  accept: string | null
+): string {
+  const descriptor = [
+    `src=${params.sourceUrl}`,
+    `w=${params.w ?? 0}`,
+    `h=${params.h ?? 0}`,
+    `fit=${params.fit}`,
+    `fmt=${outputMime}`,
+    `q=${params.q}`,
+    `rot=${params.rot ?? 0}`,
+    `flip=${params.flip ? 1 : 0}`,
+    `flop=${params.flop ? 1 : 0}`,
+    `blur=${params.blur ?? 0}`,
+    `brightness=${params.brightness ?? 1}`,
+    `saturation=${params.saturation ?? 1}`,
+    `withoutEnlargement=${params.withoutEnlargement ? 1 : 0}`,
+    `filter=${params.filter ?? "lanczos3"}`,
+    params.fmt === "auto" ? `accept=${accept ?? ""}` : "",
+  ].join("|");
+
+  const hasher = new Bun.CryptoHasher("sha256");
+  hasher.update(descriptor);
+  return `${hasher.digest("hex")}.${EXTENSION_BY_MIME[outputMime] ?? "bin"}`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Transform failed";
+}
+
+// ---------------------------------------------------------------------------
+// Existing Bun.Image transform helpers (unchanged)
+// ---------------------------------------------------------------------------
 async function transformImage(
   params: TransformParams,
   accept: string | null
