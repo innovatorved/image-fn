@@ -131,11 +131,11 @@ GET /api/transform?blob=&lt;blobName&gt;&amp;w=800&amp;format=webp&amp;q=80</cod
           <tr><td><code>AZURE_REPLICA_STORAGE_ACCOUNT_NAME</code></td><td>Optional region-local read replica (Object Replication)</td></tr>
           <tr><td><code>AZURE_RAW_CONTAINER</code></td><td>Raw originals container (default <code>raw-images</code>)</td></tr>
           <tr><td><code>AZURE_CACHE_CONTAINER</code></td><td>Transformed variants container (default <code>processed-cache</code>)</td></tr>
-          <tr><td><code>AZURE_STORAGE_CONNECTION_STRING</code></td><td>Local development only (Azurite or shared-key account)</td></tr>
+          <tr><td><code>AZURE_STORAGE_CONNECTION_STRING</code></td><td>Access-key fallback for labs without Managed Identity. <strong>Takes precedence</strong> — when set, <code>DefaultAzureCredential</code> is never constructed</td></tr>
         </tbody>
       </table>
     </div>
-    <p>Run <code>bun run storage:init</code> once per account to create the containers.</p>
+    <p>Run <code>bun run storage:init</code> once per account to create the containers, then <code>bun run start</code>. A connection-string VM boot script is provided at <code>deploy/azure/cloud-init.yaml</code>.</p>
 
     <h2>Deployment</h2>
     <h3>Local development</h3>

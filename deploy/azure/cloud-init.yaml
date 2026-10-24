@@ -1,0 +1,97 @@
+#cloud-config
+#
+# image-fn :: Azure VM boot script (connection-string / access-key auth)
+#
+# This custom-data script provisions a single image-fn node that authenticates to
+# Azure Blob Storage with a Storage Account connection string. It deliberately
+# bypasses Entra ID / Managed Identity, so it works in labs and subscriptions
+# where role assignments are not available.
+#
+# Before use, replace __AZURE_STORAGE_CONNECTION_STRING__ below with the key1 or
+# key2 connection string from:
+#   Azure Portal -> Storage account -> Security + networking -> Access keys
+#
+# SECURITY: custom data is stored on the VM resource and readable by anyone with
+# access to it. For production, prefer Managed Identity (leave
+# AZURE_STORAGE_CONNECTION_STRING empty) or fetch the secret from Key Vault at
+# boot. See README "Azure multi-region mode".
+#
+# The env file / systemd unit are created with `write_files` rather than an
+# indented shell heredoc, because cloud-init indents every heredoc line (which
+# would prevent the `EOF` terminator from being recognised).
+package_update: true
+package_upgrade: false
+packages:
+  - curl
+  - unzip
+  - git
+  - jq
+  - ca-certificates
+
+write_files:
+  - path: /etc/image-fn.env
+    owner: root:root
+    permissions: "0600"
+    content: |
+      # AZURE_REGION is appended at boot from Azure IMDS
+      PORT=3000
+      ENVIRONMENT=production
+      AZURE_STORAGE_CONNECTION_STRING="__AZURE_STORAGE_CONNECTION_STRING__"
+      AZURE_RAW_CONTAINER=raw-images
+      AZURE_CACHE_CONTAINER=processed-cache
+
+  - path: /etc/systemd/system/image-fn.service
+    owner: root:root
+    permissions: "0644"
+    content: |
+      [Unit]
+      Description=innovatorved/image-fn Bun.Image Multi-Region Service
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=simple
+      User=root
+      WorkingDirectory=/opt/image-fn
+      EnvironmentFile=/etc/image-fn.env
+      ExecStart=/usr/local/bin/bun run src/index.ts
+      Restart=always
+      RestartSec=3
+      LimitNOFILE=65535
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  - |
+    set -euxo pipefail
+    export HOME=/root
+
+    # 1. Install latest Bun runtime (v1.3.14+ with native Bun.Image support)
+    curl -fsSL https://bun.sh/install | bash
+    install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun
+    ln -sf /usr/local/bin/bun /usr/bin/bun
+
+    # 2. Query Azure Instance Metadata Service (IMDS) to auto-detect VM Region
+    DETECTED_REGION=$(curl -s -H Metadata:true --noproxy "*" "http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text" || echo "centralindia")
+    echo "[boot] Detected Azure Region: ${DETECTED_REGION}"
+    grep -q '^AZURE_REGION=' /etc/image-fn.env || printf 'AZURE_REGION=%s\n' "${DETECTED_REGION}" >> /etc/image-fn.env
+
+    # 3. Clone innovatorved/image-fn and check out the Azure feature branch
+    rm -rf /opt/image-fn
+    git clone https://github.com/innovatorved/image-fn.git /opt/image-fn
+    cd /opt/image-fn
+    git checkout feat/azure-multi-region || git checkout main
+
+    # 4. Install dependencies (@azure/storage-blob + @azure/identity come from the lockfile)
+    /usr/local/bin/bun install --frozen-lockfile
+
+    # 5. The connection string is checked BEFORE DefaultAzureCredential in
+    #    src/storage.ts, so Managed Identity is skipped entirely.
+    systemctl daemon-reload
+    systemctl enable image-fn.service
+    systemctl restart image-fn.service
+
+    # 6. Smoke-test the health probe (proves the LB/Front Door endpoint is live)
+    sleep 2
+    curl -fsS http://127.0.0.1:3000/health | jq .

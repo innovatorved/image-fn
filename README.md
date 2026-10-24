@@ -49,14 +49,38 @@ bun run storage:init
 
 Storage behaviour:
 
-- **Passwordless** `DefaultAzureCredential` on Azure VMs; `AZURE_STORAGE_CONNECTION_STRING` for local dev.
+- **Auth precedence**: `AZURE_STORAGE_CONNECTION_STRING` (access key) first — when set, `DefaultAzureCredential` is never constructed; otherwise **passwordless** `DefaultAzureCredential` on Azure VMs.
 - **RA-GRS failover**: reads retry against `<account>-secondary.blob.core.windows.net` if `eastus` is down.
-- **Region-local replica**: set `AZURE_REPLICA_STORAGE_ACCOUNT_NAME` on European VMs to read from the locally Object-Replicated account first.
+- **Region-local replica**: set `AZURE_REPLICA_STORAGE_ACCOUNT_NAME` on European VMs to read from the locally Object-Replicated account first (Managed Identity only).
 - Responses report the source: `X-Cache: HIT-AZURE-BLOB`, `HIT-AZURE-REPLICA`, or `MISS-TRANSFORMED` (write-through).
+- `/health` reports `storageAuth: "connection-string" | "managed-identity"` and `storageReady`.
 
 The legacy `/i` route also uses the shared Azure cache (L2) behind its per-instance
 in-memory cache (L1), so existing embeds keep working. See `.env.example` for all
 variables.
+
+### Lab / subscription without Managed Identity
+
+If your tenant can't assign VM identities or RBAC roles, use the access-key
+connection string. It takes precedence over Managed Identity, so no code change
+is needed:
+
+```bash
+# Storage account -> Security + networking -> Access keys -> Connection string
+export AZURE_STORAGE_CONNECTION_STRING='DefaultEndpointsProtocol=https;AccountName=...;AccountKey=...;EndpointSuffix=core.windows.net'
+export AZURE_REGION=centralindia
+bun run storage:init   # creates raw-images + processed-cache
+bun run start          # /health now reports storageAuth: "connection-string"
+```
+
+To boot a whole VM this way, use [`deploy/azure/cloud-init.yaml`](deploy/azure/cloud-init.yaml):
+paste your connection string into the `AZURE_STORAGE_CONNECTION_STRING` placeholder,
+auto-detect the region from IMDS, clone this branch, and start a `systemd` service
+with a `/health` smoke test.
+
+> Treat connection strings as secrets. For production prefer Managed Identity (or
+> fetch the key from Key Vault at boot); cloud-init custom data is readable by
+> anyone with access to the VM resource.
 
 ## Docker
 

@@ -41,41 +41,60 @@ const isStorageConfigured = Boolean(STORAGE_ACCOUNT_NAME || CONNECTION_STRING);
 let connectionStringBlobClient: BlobServiceClient | null = null;
 let storageReady = false;
 
-function buildBlobClient(accountName: string, enableSecondaryFailover = true): BlobServiceClient | null {
-  // Local development / Azurite path: the connection string already encodes the
-  // account, endpoint and shared key, so managed identity is not used.
+/**
+ * True when `AZURE_STORAGE_CONNECTION_STRING` is set. In that case the primary
+ * client is built from the access key and the Managed Identity code path
+ * (`DefaultAzureCredential`) is never constructed - handy for labs/subscriptions
+ * without Entra ID permissions.
+ */
+export const USING_CONNECTION_STRING = CONNECTION_STRING.length > 0;
+
+/** Primary client: connection string first (bypasses Managed Identity), then DefaultAzureCredential. */
+function buildPrimaryBlobClient(): BlobServiceClient | null {
+  // Local development / Azurite / lab: the connection string already encodes
+  // the account, endpoint and access key - no Managed Identity involved.
   if (CONNECTION_STRING) {
     connectionStringBlobClient ??= BlobServiceClient.fromConnectionString(CONNECTION_STRING);
     return connectionStringBlobClient;
   }
-  if (!accountName) {
+  if (!STORAGE_ACCOUNT_NAME) {
     return null;
   }
 
-  const primaryUrl = `https://${accountName}.blob.core.windows.net`;
-  const credential = new DefaultAzureCredential();
+  return new BlobServiceClient(
+    `https://${STORAGE_ACCOUNT_NAME}.blob.core.windows.net`,
+    new DefaultAzureCredential(),
+    {
+      retryOptions: {
+        ...RETRY_OPTIONS,
+        // Automatic RA-GRS read failover when the primary storage region is down.
+        // Reads are retried against this host; writes always target the primary.
+        secondaryHost: `${STORAGE_ACCOUNT_NAME}-secondary.blob.core.windows.net`,
+      },
+    }
+  );
+}
 
-  return new BlobServiceClient(primaryUrl, credential, {
-    retryOptions: {
-      ...RETRY_OPTIONS,
-      // Automatic RA-GRS read failover when the primary storage region is down.
-      // Reads are retried against this host; writes always target the primary.
-      secondaryHost: enableSecondaryFailover
-        ? `${accountName}-secondary.blob.core.windows.net`
-        : undefined,
-    },
-  });
+/**
+ * Optional regional replica client (e.g., North Europe Object-Replicated storage
+ * account for fast local reads). A primary connection string must never be
+ * reused here - the replica is a distinct account, authenticated with Managed
+ * Identity, and is not RA-GRS so it has no `-secondary` endpoint.
+ */
+function buildReplicaBlobClient(): BlobServiceClient | null {
+  if (!REPLICA_STORAGE_ACCOUNT_NAME) return null;
+  return new BlobServiceClient(
+    `https://${REPLICA_STORAGE_ACCOUNT_NAME}.blob.core.windows.net`,
+    new DefaultAzureCredential(),
+    { retryOptions: { ...RETRY_OPTIONS } }
+  );
 }
 
 // Primary client (East US RA-GRS storage account - used for all writes and primary reads)
-export const primaryBlobClient = buildBlobClient(STORAGE_ACCOUNT_NAME, true);
+export const primaryBlobClient = buildPrimaryBlobClient();
 
-// Optional regional replica client (e.g., North Europe Object-Replicated storage
-// account for fast local reads). Failover is disabled: this account is a read
-// replica, not RA-GRS, so there is no `-secondary` endpoint to fall back to.
-export const replicaBlobClient = REPLICA_STORAGE_ACCOUNT_NAME
-  ? buildBlobClient(REPLICA_STORAGE_ACCOUNT_NAME, false)
-  : null;
+// Optional regional replica client (North Europe Object-Replicated account).
+export const replicaBlobClient = buildReplicaBlobClient();
 
 export const rawContainer: ContainerClient | null = primaryBlobClient
   ? primaryBlobClient.getContainerClient(RAW_CONTAINER_NAME)
