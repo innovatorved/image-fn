@@ -7,3 +7,7 @@ pnpm-lock.yaml
 *.log
 .DS_Store
 .env
+
+# Local VM boot scripts may embed real storage keys — keep the committed
+# template at deploy/azure/cloud-init.yaml, never the root copy.
+/cloud-init.yaml

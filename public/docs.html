@@ -105,7 +105,7 @@ GET /api/transform?blob=&lt;blobName&gt;&amp;w=800&amp;format=webp&amp;q=80</cod
         </thead>
         <tbody>
           <tr><td><code>url</code> <em>or</em> <code>blob</code></td><td>HTTPS source image, or a blob name previously stored in <code>raw-images</code></td></tr>
-          <tr><td><code>w</code>, <code>h</code></td><td>Output dimensions, 1–4096</td></tr>
+          <tr><td><code>w</code>, <code>h</code></td><td>Output dimensions, 1–4096. Sources are decoded up to <code>MAX_IMAGE_PIXELS</code> (~256 MP) and <code>MAX_SOURCE_BYTES</code> (25 MiB)</td></tr>
           <tr><td><code>fit</code></td><td><code>inside</code> (default), <code>cover</code>, <code>contain</code>, <code>fill</code>, or <code>pad</code></td></tr>
           <tr><td><code>format</code></td><td><code>webp</code> (default), <code>jpeg</code>/<code>jpg</code>, or <code>png</code></td></tr>
           <tr><td><code>q</code></td><td>Quality 1–100</td></tr>
@@ -129,6 +129,7 @@ GET /api/transform?blob=&lt;blobName&gt;&amp;w=800&amp;format=webp&amp;q=80</cod
           <tr><td><code>AZURE_REGION</code></td><td>Region reported by <code>/health</code> (e.g. <code>eastus</code>, <code>westus2</code>, <code>northeurope</code>)</td></tr>
           <tr><td><code>AZURE_STORAGE_ACCOUNT_NAME</code></td><td>Primary RA-GRS account; use <code>DefaultAzureCredential</code> (VM Managed Identity), no keys needed</td></tr>
           <tr><td><code>AZURE_REPLICA_STORAGE_ACCOUNT_NAME</code></td><td>Optional region-local read replica (Object Replication)</td></tr>
+          <tr><td><code>AZURE_REPLICA_STORAGE_CONNECTION_STRING</code></td><td>Optional access-key string for the replica account (takes precedence for the replica client)</td></tr>
           <tr><td><code>AZURE_RAW_CONTAINER</code></td><td>Raw originals container (default <code>raw-images</code>)</td></tr>
           <tr><td><code>AZURE_CACHE_CONTAINER</code></td><td>Transformed variants container (default <code>processed-cache</code>)</td></tr>
           <tr><td><code>AZURE_STORAGE_CONNECTION_STRING</code></td><td>Access-key fallback for labs without Managed Identity. <strong>Takes precedence</strong> — when set, <code>DefaultAzureCredential</code> is never constructed</td></tr>

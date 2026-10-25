@@ -21,6 +21,7 @@ import { DefaultAzureCredential } from "@azure/identity";
 export const STORAGE_ACCOUNT_NAME = process.env.AZURE_STORAGE_ACCOUNT_NAME || "";
 export const REPLICA_STORAGE_ACCOUNT_NAME = process.env.AZURE_REPLICA_STORAGE_ACCOUNT_NAME || "";
 export const CONNECTION_STRING = process.env.AZURE_STORAGE_CONNECTION_STRING || "";
+export const REPLICA_CONNECTION_STRING = process.env.AZURE_REPLICA_STORAGE_CONNECTION_STRING || "";
 export const RAW_CONTAINER_NAME = process.env.AZURE_RAW_CONTAINER || "raw-images";
 export const CACHE_CONTAINER_NAME = process.env.AZURE_CACHE_CONTAINER || "processed-cache";
 
@@ -77,11 +78,16 @@ function buildPrimaryBlobClient(): BlobServiceClient | null {
 
 /**
  * Optional regional replica client (e.g., North Europe Object-Replicated storage
- * account for fast local reads). A primary connection string must never be
- * reused here - the replica is a distinct account, authenticated with Managed
- * Identity, and is not RA-GRS so it has no `-secondary` endpoint.
+ * account for fast local reads). It supports its own connection string
+ * (`AZURE_REPLICA_STORAGE_CONNECTION_STRING`) for labs without Managed Identity;
+ * otherwise it authenticates with DefaultAzureCredential. A primary connection
+ * string is never reused here - the replica is a distinct account and is not
+ * RA-GRS, so it has no `-secondary` endpoint.
  */
 function buildReplicaBlobClient(): BlobServiceClient | null {
+  if (REPLICA_CONNECTION_STRING) {
+    return BlobServiceClient.fromConnectionString(REPLICA_CONNECTION_STRING);
+  }
   if (!REPLICA_STORAGE_ACCOUNT_NAME) return null;
   return new BlobServiceClient(
     `https://${REPLICA_STORAGE_ACCOUNT_NAME}.blob.core.windows.net`,
@@ -171,8 +177,10 @@ export async function initStorageContainers(): Promise<void> {
       `[Azure Storage] Connected to primary account '${STORAGE_ACCOUNT_NAME || "connection-string"}' ` +
         `(containers: ${RAW_CONTAINER_NAME}, ${CACHE_CONTAINER_NAME})`
     );
-    if (REPLICA_STORAGE_ACCOUNT_NAME) {
-      console.log(`[Azure Storage] Local read-replica enabled: '${REPLICA_STORAGE_ACCOUNT_NAME}'`);
+    if (REPLICA_STORAGE_ACCOUNT_NAME || REPLICA_CONNECTION_STRING) {
+      console.log(
+        `[Azure Storage] Local read-replica enabled: '${REPLICA_STORAGE_ACCOUNT_NAME || "connection-string"}'`
+      );
     }
   } catch (err) {
     console.warn(

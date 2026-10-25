@@ -33,8 +33,10 @@ const ALLOWED_HOST_SUFFIXES = process.env.ALLOWED_HOST_SUFFIXES ?? "*";
 const ENGINE = "bun-image";
 
 // Native Bun.Image guard for the Azure-facing transform API.
+// NOTE: API_MAX_DIMENSION caps the *output* w/h. The decode ceiling uses the
+// shared MAX_IMAGE_PIXELS budget so large (up to ~25 MB / 256 MP) sources are
+// accepted, matching the legacy /i route.
 const API_MAX_DIMENSION = 4096;
-const API_MAX_PIXELS = API_MAX_DIMENSION * API_MAX_DIMENSION;
 const API_FITS = new Set(["inside", "cover", "contain", "fill", "pad"]);
 const API_FORMATS: Record<string, "image/webp" | "image/jpeg" | "image/png"> = {
   webp: "image/webp",
@@ -321,20 +323,20 @@ async function transformApiImage(
     const pixelCheck = validateOutputPixels(width, height);
     if (!pixelCheck.ok) return pixelCheck;
     try {
-      const inner = new Bun.Image(inputBytes, { maxPixels: API_MAX_PIXELS, autoOrient: true });
+      const inner = new Bun.Image(inputBytes, { maxPixels: MAX_IMAGE_PIXELS, autoOrient: true });
       inner.resize(width, height, { fit: "inside", withoutEnlargement: true });
       const fittedPng = new Uint8Array(await inner.png().bytes());
       const letterboxed = letterboxPng(fittedPng, width, height);
-      const output = new Bun.Image(letterboxed, { maxPixels: API_MAX_PIXELS, autoOrient: false });
+      const output = new Bun.Image(letterboxed, { maxPixels: MAX_IMAGE_PIXELS, autoOrient: false });
       const encoded = await encodeImage(output, contentType, quality);
       return { ok: true, body: encoded.body };
     } catch (error) {
-      return { ok: false, error: `Image processing error: ${errorMessage(error)}`, status: 422 };
+      return { ...imageError(error) };
     }
   }
 
   try {
-    const image = new Bun.Image(inputBytes, { maxPixels: API_MAX_PIXELS, autoOrient: true });
+    const image = new Bun.Image(inputBytes, { maxPixels: MAX_IMAGE_PIXELS, autoOrient: true });
     // Bun.Image only supports `inside` and `fill`; `cover`/`contain` map to `inside`.
     const bunFit = fit === "fill" ? "fill" : "inside";
     const resizeOptions: Bun.Image.ResizeOptions = { fit: bunFit, withoutEnlargement: true };
@@ -346,7 +348,7 @@ async function transformApiImage(
     } else if (width !== undefined) {
       image.resize(width, undefined, resizeOptions);
     } else if (height !== undefined) {
-      const metadata = await new Bun.Image(inputBytes, { maxPixels: API_MAX_PIXELS, autoOrient: true }).metadata();
+      const metadata = await new Bun.Image(inputBytes, { maxPixels: MAX_IMAGE_PIXELS, autoOrient: true }).metadata();
       const derivedWidth = Math.max(1, Math.round((metadata.width / metadata.height) * height));
       const pixelCheck = validateOutputPixels(derivedWidth, height);
       if (!pixelCheck.ok) return pixelCheck;
@@ -356,8 +358,30 @@ async function transformApiImage(
     const encoded = await encodeImage(image, contentType, quality);
     return { ok: true, body: encoded.body };
   } catch (error) {
-    return { ok: false, error: `Image processing error: ${errorMessage(error)}`, status: 422 };
+    return { ...imageError(error) };
   }
+}
+
+/**
+ * Maps Bun.Image terminal rejections to a meaningful HTTP status. In particular
+ * the "too many pixels" guard returns 413 (payload too large) instead of a
+ * vague 422 so a caller knows to send a smaller source or raise
+ * MAX_IMAGE_PIXELS.
+ */
+function imageError(error: unknown): { ok: false; error: string; status: number } {
+  const code = (error as { code?: string })?.code;
+  const message = errorMessage(error);
+  if (code === "ERR_IMAGE_TOO_MANY_PIXELS") {
+    return {
+      ok: false,
+      error: `Image processing error: source exceeds the pixel limit (${MAX_IMAGE_PIXELS} px). ${message}`,
+      status: 413,
+    };
+  }
+  if (code === "ERR_IMAGE_FORMAT_UNSUPPORTED") {
+    return { ok: false, error: `Image processing error (unsupported format): ${message}`, status: 415 };
+  }
+  return { ok: false, error: `Image processing error: ${message}`, status: 422 };
 }
 
 function computeApiCacheKey(
